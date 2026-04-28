@@ -5,7 +5,6 @@ import tensorflow as tf
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from huggingface_hub import hf_hub_download
 from PIL import Image
-import httpx
 from contextlib import asynccontextmanager
 
 from telegram import Update
@@ -55,7 +54,7 @@ TEXT_TO_CANONICAL = {
     "Tinea Ringworm Candidiasis": "Ringworm",
 }
 
-# ================== GLOBAL MODELS (loaded at startup) ==================
+# ================== GLOBAL MODELS ==================
 image_model = None
 text_model = None
 
@@ -180,41 +179,9 @@ def get_confidence_label(conf):
     else:
         return "Low ❗"
 
-# ================== TELEGRAM HANDLERS ==================
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Welcome to Skin Disease AI Bot!\n\n"
-        "📸 Send an image\n"
-        "📝 Or describe symptoms\n"
-        "🤖 Or both for best accuracy!"
-    )
-
-# ================== API ROUTES ==================
-@app.get("/")
-async def root():
-    return {"status": "alive", "message": "Skin Disease Bot API is running"}
-
-@app.post("/predict")
-async def predict(image: UploadFile = File(None), text: str = Form(None)):
-    img_bytes = await image.read() if image else None
-    return run_prediction(img_bytes, text)
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-
-@app.post("/webhook")
-async def webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, app_bot.bot)
-    await app_bot.process_update(update)
-    return {"ok": True}
-
-
-
 # ================== SHARED PREDICTION LOGIC ==================
 def run_prediction(image_bytes: bytes | None = None, text: str | None = None) -> dict:
-    """Returns the same dictionary that /predict used to return."""
+    """Returns the same dictionary that /predict would return."""
     if image_bytes is None and text is None:
         raise HTTPException(400, "Please provide an image or text description.")
 
@@ -267,7 +234,36 @@ def run_prediction(image_bytes: bytes | None = None, text: str | None = None) ->
     ]
     return {"top_predictions": top3}
 
-# ================== TELEGRAM HANDLER (no HTTP call!) ==================
+# ================== API ROUTES ==================
+@app.get("/")
+async def root():
+    return {"status": "alive", "message": "Skin Disease Bot API is running"}
+
+@app.post("/predict")
+async def predict(image: UploadFile = File(None), text: str = Form(None)):
+    img_bytes = await image.read() if image else None
+    return run_prediction(img_bytes, text)
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, app_bot.bot)
+    await app_bot.process_update(update)
+    return {"ok": True}
+
+# ================== TELEGRAM HANDLERS ==================
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Welcome to Skin Disease AI Bot!\n\n"
+        "📸 Send an image\n"
+        "📝 Or describe symptoms\n"
+        "🤖 Or both for best accuracy!"
+    )
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -300,3 +296,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
+
+# ---------- REGISTER HANDLERS ----------
+app_bot.add_handler(CommandHandler("start", start_cmd))
+app_bot.add_handler(MessageHandler(filters.ALL, handle_message))

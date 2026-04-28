@@ -5,5 +5,4 @@ numpy
 tensorflow
 huggingface_hub
 Pillow
-httpx
 python-telegram-bot[job-queue]
