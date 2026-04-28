@@ -189,51 +189,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 Or both for best accuracy!"
     )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-
-    text = update.message.text
-    photo = update.message.photo
-
-    data, files = {}, {}
-    if text:
-        data["text"] = text
-
-    try:
-        if photo:
-            # Download photo bytes directly (no temp file)
-            file = await photo[-1].get_file()
-            img_bytes = await file.download_as_bytearray()
-            files["image"] = ("image.jpg", bytes(img_bytes), "image/jpeg")
-            async with httpx.AsyncClient() as client:
-                res = await client.post("http://localhost:8000/predict", data=data, files=files)
-                result = res.json()
-        else:
-            async with httpx.AsyncClient() as client:
-                res = await client.post("http://localhost:8000/predict", data=data)
-                result = res.json()
-
-        if "error" in result:
-            await update.message.reply_text(
-                f"❗ {result.get('message', result['error'])}\n"
-                f"Confidence: {result.get('confidence', 0):.2f}"
-            )
-            return
-
-        msg = "🧠 *Skin Disease Prediction*\n\n"
-        for i, p in enumerate(result["top_predictions"], start=1):
-            label = get_confidence_label(p["confidence"])
-            msg += f"{i}. *{p['disease']}*\n   Confidence: {p['confidence']:.2f} ({label})\n\n"
-        msg += "⚠️ _This is an AI-based prediction. Please consult a dermatologist._"
-        await update.message.reply_text(msg, parse_mode="Markdown")
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-app_bot.add_handler(CommandHandler("start", start_cmd))
-app_bot.add_handler(MessageHandler(filters.ALL, handle_message))
-
 # ================== API ROUTES ==================
 @app.get("/")
 async def root():
@@ -241,12 +196,31 @@ async def root():
 
 @app.post("/predict")
 async def predict(image: UploadFile = File(None), text: str = Form(None)):
-    if not image and not text:
+    img_bytes = await image.read() if image else None
+    return run_prediction(img_bytes, text)
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, app_bot.bot)
+    await app_bot.process_update(update)
+    return {"ok": True}
+
+
+
+# ================== SHARED PREDICTION LOGIC ==================
+def run_prediction(image_bytes: bytes | None = None, text: str | None = None) -> dict:
+    """Returns the same dictionary that /predict used to return."""
+    if image_bytes is None and text is None:
         raise HTTPException(400, "Please provide an image or text description.")
 
     img_pred, text_pred = None, None
 
-    # Text precheck
+    # ------ Text precheck ------
     if text:
         if not is_medical_text(text):
             return {
@@ -257,14 +231,14 @@ async def predict(image: UploadFile = File(None), text: str = Form(None)):
         if rule_pred:
             return {"top_predictions": [{"disease": rule_pred, "confidence": 0.85}]}
 
-    if image:
-        # Read image bytes directly
-        contents = await image.read()
-        img = preprocess_image(contents)
+    # ------ Image ------
+    if image_bytes:
+        img = preprocess_image(image_bytes)
         img_pred = image_model.predict(img)
         print("IMAGE PRED:", img_pred)
 
-    if text:
+    # ------ Text model ------
+    if text and not (text and rule_based_prediction(text)):  # already handled rule
         txt = preprocess_text(text)
         text_pred = text_model.predict(txt)
         print("TEXT PRED:", text_pred)
@@ -293,13 +267,36 @@ async def predict(image: UploadFile = File(None), text: str = Form(None)):
     ]
     return {"top_predictions": top3}
 
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
+# ================== TELEGRAM HANDLER (no HTTP call!) ==================
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
 
-@app.post("/webhook")
-async def webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, app_bot.bot)
-    await app_bot.process_update(update)
-    return {"ok": True}
+    text = update.message.text
+    photo = update.message.photo
+
+    try:
+        if photo:
+            file = await photo[-1].get_file()
+            img_bytes = bytes(await file.download_as_bytearray())
+        else:
+            img_bytes = None
+
+        result = run_prediction(image_bytes=img_bytes, text=text)
+
+        if "error" in result:
+            await update.message.reply_text(
+                f"❗ {result.get('message', result['error'])}\n"
+                f"Confidence: {result.get('confidence', 0):.2f}"
+            )
+            return
+
+        msg = "🧠 *Skin Disease Prediction*\n\n"
+        for i, p in enumerate(result["top_predictions"], start=1):
+            label = get_confidence_label(p["confidence"])
+            msg += f"{i}. *{p['disease']}*\n   Confidence: {p['confidence']:.2f} ({label})\n\n"
+        msg += "⚠️ _This is an AI-based prediction. Please consult a dermatologist._"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
