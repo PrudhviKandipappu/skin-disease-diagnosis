@@ -103,10 +103,6 @@ async def lifespan(app: FastAPI):
     await app_bot.bot.delete_webhook()
     await app_bot.shutdown()
 
-@app.get("/")
-async def root():
-    return {"status": "alive", "message": "Skin Disease Bot API is running"}
-
 app = FastAPI(lifespan=lifespan)
 
 # ================== PREPROCESS ==================
@@ -239,6 +235,10 @@ app_bot.add_handler(CommandHandler("start", start_cmd))
 app_bot.add_handler(MessageHandler(filters.ALL, handle_message))
 
 # ================== API ROUTES ==================
+@app.get("/")
+async def root():
+    return {"status": "alive", "message": "Skin Disease Bot API is running"}
+
 @app.post("/predict")
 async def predict(image: UploadFile = File(None), text: str = Form(None)):
     if not image and not text:
