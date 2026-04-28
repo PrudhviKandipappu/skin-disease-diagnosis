@@ -81,21 +81,31 @@ app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    # 1. Download models
     download_models()
-    # Set webhook once server is up
+
+    # 2. Initialize the bot
+    await app_bot.initialize()
+    print("✅ Bot initialized")
+
+    # 3. Set webhook
     render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
     if not render_host:
-        # Fallback for local testing
         webhook_url = f"https://{os.getenv('HOST', 'localhost')}/webhook"
     else:
         webhook_url = f"https://{render_host}/webhook"
     await app_bot.bot.set_webhook(webhook_url)
     print(f"✅ Webhook set to {webhook_url}")
+
     yield
-    # Shutdown: remove webhook and stop the bot
+
+    # Shutdown
     await app_bot.bot.delete_webhook()
     await app_bot.shutdown()
+
+@app.get("/")
+async def root():
+    return {"status": "alive", "message": "Skin Disease Bot API is running"}
 
 app = FastAPI(lifespan=lifespan)
 
