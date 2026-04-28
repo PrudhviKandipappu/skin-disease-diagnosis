@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-multipart
+numpy
+tensorflow
+huggingface_hub
+Pillow
+httpx
+python-telegram-bot[job-queue]
