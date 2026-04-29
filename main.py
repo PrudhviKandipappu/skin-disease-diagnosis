@@ -215,6 +215,14 @@ def run_prediction(image_bytes: bytes | None = None, text: str | None = None) ->
             text_pred = None
 
     final_pred = fuse(img_pred, text_pred)
+
+    if final_pred is None:
+        return {
+            "error": "Low confidence",
+            "message": "The model could not confidently determine a condition. Please provide a clearer description or an image.",
+            "confidence": 0.0,
+        }
+
     final_pred = final_pred / (np.sum(final_pred) + 1e-8)
     confidence = float(np.max(final_pred))
 
