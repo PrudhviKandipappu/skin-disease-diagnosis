@@ -128,7 +128,7 @@ def is_medical_text(text):
 
 def rule_based_prediction(text):
     text = text.lower()
-    if "ring" in text or "circular" in text:
+    if "ring" in text or "circular" or "round" in text:
         return "Ringworm"
     if "pimple" in text or "acne" in text:
         return "Acne"
@@ -210,9 +210,9 @@ def run_prediction(image_bytes: bytes | None = None, text: str | None = None) ->
         txt = preprocess_text(text)
         text_pred = text_model.predict(txt)
         print("TEXT PRED:", text_pred)
-        if not is_text_reliable(text_pred):
-            print("Ignoring unreliable text output")
-            text_pred = None
+        # if not is_text_reliable(text_pred):
+        #     print("Ignoring unreliable text output")
+        #     text_pred = None
 
     final_pred = fuse(img_pred, text_pred)
 
