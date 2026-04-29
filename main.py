@@ -252,7 +252,8 @@ async def health():
 async def webhook(request: Request):
     data = await request.json()
     update = Update.de_json(data, app_bot.bot)
-    await app_bot.process_update(update)
+    # Process the update in the background, so we reply to Telegram quickly
+    asyncio.create_task(app_bot.process_update(update))
     return {"ok": True}
 
 # ================== TELEGRAM HANDLERS ==================
