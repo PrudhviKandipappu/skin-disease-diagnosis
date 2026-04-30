@@ -292,12 +292,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if photo:
             print("📥 Downloading image…")
             file = await photo[-1].get_file()
-            img_bytes = bytes(await file.download_as_bytearray())
-            print(f"📸 Downloaded {len(img_bytes)} bytes")
+            # Add a timeout to the download (15 seconds)
+            try:
+                raw_bytes = await asyncio.wait_for(
+                    file.download_as_bytearray(),
+                    timeout=15.0
+                )
+                img_bytes = bytes(raw_bytes)
+                print(f"📸 Downloaded {len(img_bytes)} bytes")
+            except asyncio.TimeoutError:
+                await thinking_msg.edit_text("❌ Image download timed out. Please try again.")
+                return
         else:
             img_bytes = None
 
-        result = run_prediction(image_bytes=img_bytes, text=text)
+        # Run the prediction in a thread to avoid blocking the event loop
+        print("⏳ Running prediction...")
+        result = await asyncio.to_thread(run_prediction, image_bytes=img_bytes, text=text)
         print(f"✅ Prediction result: {result}")
 
         send_func = (lambda text, **kw: update.message.reply_text(text, **kw)) if not thinking_msg else thinking_msg.edit_text
