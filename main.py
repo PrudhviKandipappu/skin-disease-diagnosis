@@ -128,7 +128,7 @@ def is_medical_text(text):
 
 def rule_based_prediction(text):
     text = text.lower()
-    if "ring" in text or "circular" or "round" in text:
+    if "ring" in text or "circular" in text or "round" in text:
         return "Ringworm"
     if "pimple" in text or "acne" in text:
         return "Acne"
@@ -136,8 +136,9 @@ def rule_based_prediction(text):
         return "Melanoma"
     return None
 
-def is_text_reliable(text_pred):
-    return np.max(text_pred[0]) < 0.9
+# is_text_reliable is no longer used, but kept for reference
+# def is_text_reliable(text_pred):
+#     return np.max(text_pred[0]) < 0.9
 
 # ================== MAPPING ==================
 def map_text_to_canonical(text_probs):
@@ -182,7 +183,7 @@ def get_confidence_label(conf):
 
 # ================== SHARED PREDICTION LOGIC ==================
 def run_prediction(image_bytes: bytes | None = None, text: str | None = None) -> dict:
-    """Returns the same dictionary that /predict would return."""
+    """Returns the prediction dictionary used by both API and Telegram."""
     if image_bytes is None and text is None:
         raise HTTPException(400, "Please provide an image or text description.")
 
@@ -210,9 +211,7 @@ def run_prediction(image_bytes: bytes | None = None, text: str | None = None) ->
         txt = preprocess_text(text)
         text_pred = text_model.predict(txt)
         print("TEXT PRED:", text_pred)
-        # if not is_text_reliable(text_pred):
-        #     print("Ignoring unreliable text output")
-        #     text_pred = None
+        # Reliability check removed – we now trust the model
 
     final_pred = fuse(img_pred, text_pred)
 
@@ -261,7 +260,7 @@ async def health():
 async def webhook(request: Request):
     data = await request.json()
     update = Update.de_json(data, app_bot.bot)
-    # Process the update in the background, so we reply to Telegram quickly
+    # Process update asynchronously to avoid Telegram timeout
     asyncio.create_task(app_bot.process_update(update))
     return {"ok": True}
 
@@ -281,17 +280,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     photo = update.message.photo
 
+    print(f"🔥 HANDLER CALLED: text={text}, has_photo={bool(photo)}")
+
+    thinking_msg = None
+    try:
+        thinking_msg = await update.message.reply_text("Processing your request… 🧠")
+    except Exception as e:
+        print(f"⚠️ Could not send thinking message: {e}")
+
     try:
         if photo:
+            print("📥 Downloading image…")
             file = await photo[-1].get_file()
             img_bytes = bytes(await file.download_as_bytearray())
+            print(f"📸 Downloaded {len(img_bytes)} bytes")
         else:
             img_bytes = None
 
         result = run_prediction(image_bytes=img_bytes, text=text)
+        print(f"✅ Prediction result: {result}")
+
+        send_func = (lambda text, **kw: update.message.reply_text(text, **kw)) if not thinking_msg else thinking_msg.edit_text
 
         if "error" in result:
-            await update.message.reply_text(
+            await send_func(
                 f"❗ {result.get('message', result['error'])}\n"
                 f"Confidence: {result.get('confidence', 0):.2f}"
             )
@@ -302,11 +314,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             label = get_confidence_label(p["confidence"])
             msg += f"{i}. *{p['disease']}*\n   Confidence: {p['confidence']:.2f} ({label})\n\n"
         msg += "⚠️ _This is an AI-based prediction. Please consult a dermatologist._"
+
+        if thinking_msg:
+            await thinking_msg.delete()
         await update.message.reply_text(msg, parse_mode="Markdown")
 
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        print(f"❌ HANDLER ERROR: {str(e)}")
+        if thinking_msg:
+            try:
+                await thinking_msg.edit_text(f"❌ Internal error. Please try again.\n`{str(e)}`")
+            except:
+                pass
+        else:
+            try:
+                await update.message.reply_text("❌ Internal error. Please try again.")
+            except:
+                pass
 
-# ---------- REGISTER HANDLERS ----------
+# ---------- REGISTER HANDLERS (MANDATORY) ----------
 app_bot.add_handler(CommandHandler("start", start_cmd))
 app_bot.add_handler(MessageHandler(filters.ALL, handle_message))
