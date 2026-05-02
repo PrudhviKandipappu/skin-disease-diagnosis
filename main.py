@@ -3,6 +3,11 @@ import asyncio
 import io
 import numpy as np
 import tensorflow as tf
+
+# ---- MEMORY OPTIMISATION (1) ----
+tf.config.threading.set_intra_op_parallelism_threads(1)
+tf.config.threading.set_inter_op_parallelism_threads(1)
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from huggingface_hub import hf_hub_download
 from PIL import Image
@@ -76,8 +81,9 @@ def download_models():
         "PrudhviManikanta/skin-disease-efficientnet-multiclass",
         "model.keras",
     )
-    image_model = tf.keras.models.load_model(image_path)
-    text_model = tf.keras.models.load_model(text_path)
+    # ---- MEMORY OPTIMISATION (2): skip compilation ----
+    image_model = tf.keras.models.load_model(image_path, compile=False)
+    text_model = tf.keras.models.load_model(text_path, compile=False)
 
 # ================== FASTAPI LIFESPAN ==================
 BOT_TOKEN = os.getenv("TOKEN")
@@ -110,6 +116,10 @@ async def lifespan(app: FastAPI):
     image_model.predict(dummy)
     print("✅ Image model warmed up")
 
+    # ---- MEMORY OPTIMISATION (3): garbage collect ----
+    import gc
+    gc.collect()
+
     yield
 
     # Shutdown
@@ -141,14 +151,12 @@ def is_medical_text(text):
 
 def rule_based_prediction(text):
     text = text.lower()
-    # Common ringworm clues
     if "ring" in text or "circular" in text or "round" in text or "tinea" in text:
         return "Tinea Corporis"
     if "pimple" in text or "acne" in text:
         return "Acne"
     if "dark mole" in text:
         return "Melanoma"
-    # New disease keywords
     if "scabies" in text:
         return "Scabies"
     if "seborrheic dermatitis" in text or "seb derm" in text:
