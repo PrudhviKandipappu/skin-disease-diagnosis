@@ -35,12 +35,12 @@ CANONICAL_CLASSES = [
     "Squamous Cell Carcinoma",
     "Vascular Lesion",
     # ----- NEW CLASSES (from image dataset) -----
-    "Atopic Dermatitis",        # AD (will be mapped from text model's "Atopic Dermatitis")
-    "Contact Dermatitis",       # CD
-    "Eczema",                   # EC (generic)
-    "Scabies",                  # SC
-    "Seborrheic Dermatitis",    # SD
-    "Tinea Corporis",           # TC (ringworm of body)
+    "Atopic Dermatitis",
+    "Contact Dermatitis",
+    "Eczema",
+    "Scabies",
+    "Seborrheic Dermatitis",
+    "Tinea Corporis",
 ]
 
 TEXT_CLASSES = [
@@ -56,11 +56,10 @@ TEXT_CLASSES = [
 ]
 
 TEXT_TO_CANONICAL = {
-    "Atopic Dermatitis": "Atopic Dermatitis",           # now direct
+    "Atopic Dermatitis": "Atopic Dermatitis",
     "Benign keratosis": "Pigmented Benign Keratosis",
     "Melanocytic nevus": "Nevus",
-    "Tinea Ringworm Candidiasis": "Tinea Corporis",     # more specific
-    # Original fallback: Ringworm still works if you want
+    "Tinea Ringworm Candidiasis": "Tinea Corporis",
 }
 
 # ================== GLOBAL MODELS ==================
@@ -105,7 +104,7 @@ async def lifespan(app: FastAPI):
     await app_bot.bot.set_webhook(webhook_url)
     print(f"✅ Webhook set to {webhook_url}")
 
-    # 4. Pre‑warm the image model (one‑time compilation)
+    # 4. Pre‑warm the image model (one‑time JIT compilation)
     print("🔥 Warming up image model (this may take 1–2 minutes)...")
     dummy = np.zeros((1, 224, 224, 3), dtype=np.float32)
     image_model.predict(dummy)
@@ -144,7 +143,7 @@ def rule_based_prediction(text):
     text = text.lower()
     # Common ringworm clues
     if "ring" in text or "circular" in text or "round" in text or "tinea" in text:
-        return "Tinea Corporis"   # or "Ringworm" – we'll use the new class
+        return "Tinea Corporis"
     if "pimple" in text or "acne" in text:
         return "Acne"
     if "dark mole" in text:
@@ -164,7 +163,6 @@ def rule_based_prediction(text):
 
 # ================== MAPPING ==================
 def map_text_to_canonical(text_probs):
-    # Now canonical_probs array length matches the extended CANONICAL_CLASSES
     canonical_probs = np.zeros(len(CANONICAL_CLASSES))
     for i, text_class in enumerate(TEXT_CLASSES):
         canonical_name = TEXT_TO_CANONICAL.get(text_class, text_class)
@@ -328,42 +326,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text
     photo = update.message.photo
+    chat_id = update.effective_chat.id
 
     print(f"🔥 HANDLER CALLED: text={text}, has_photo={bool(photo)}")
 
-    thinking_msg = None
-    try:
-        thinking_msg = await update.message.reply_text("Processing your request… 🧠")
-    except Exception as e:
-        print(f"⚠️ Could not send thinking message: {e}")
+    # Show typing indicator while processing
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     try:
+        img_bytes = None
         if photo:
             print("📥 Downloading image…")
             file = await photo[-1].get_file()
-            # Add a timeout to the download (15 seconds)
+            # Timeout on download (30 seconds)
             try:
                 raw_bytes = await asyncio.wait_for(
                     file.download_as_bytearray(),
-                    timeout=15.0
+                    timeout=30.0
                 )
                 img_bytes = bytes(raw_bytes)
                 print(f"📸 Downloaded {len(img_bytes)} bytes")
             except asyncio.TimeoutError:
-                await thinking_msg.edit_text("❌ Image download timed out. Please try again.")
+                await update.message.reply_text("❌ Image download timed out. Please try again.")
                 return
-        else:
-            img_bytes = None
 
-        # Run the prediction in a thread to avoid blocking the event loop
+        # Run prediction in a thread with a generous timeout (120 seconds)
         print("⏳ Running prediction...")
-        result = await asyncio.to_thread(run_prediction, image_bytes=img_bytes, text=text)
+        result = await asyncio.wait_for(
+            asyncio.to_thread(run_prediction, image_bytes=img_bytes, text=text),
+            timeout=120.0
+        )
         print(f"✅ Prediction result: {result}")
 
-        send_func = (lambda text, **kw: update.message.reply_text(text, **kw)) if not thinking_msg else thinking_msg.edit_text
-
         if "error" in result:
-            await send_func(
+            await update.message.reply_text(
                 f"❗ {result.get('message', result['error'])}\n"
                 f"Confidence: {result.get('confidence', 0):.2f}"
             )
@@ -375,22 +371,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"{i}. *{p['disease']}*\n   Confidence: {p['confidence']:.2f} ({label})\n\n"
         msg += "⚠️ _This is an AI-based prediction. Please consult a dermatologist._"
 
-        if thinking_msg:
-            await thinking_msg.delete()
         await update.message.reply_text(msg, parse_mode="Markdown")
 
+    except asyncio.TimeoutError:
+        await update.message.reply_text("❌ Prediction timed out. Please try again with a smaller image or clearer description.")
     except Exception as e:
-        print(f"❌ HANDLER ERROR: {str(e)}")
-        if thinking_msg:
-            try:
-                await thinking_msg.edit_text(f"❌ Internal error. Please try again.\n`{str(e)}`")
-            except:
-                pass
-        else:
-            try:
-                await update.message.reply_text("❌ Internal error. Please try again.")
-            except:
-                pass
+        print(f"❌ HANDLER ERROR: {e}")
+        try:
+            await update.message.reply_text("❌ Internal error. Please try again.")
+        except:
+            pass
 
 # ---------- REGISTER HANDLERS (MANDATORY) ----------
 app_bot.add_handler(CommandHandler("start", start_cmd))
