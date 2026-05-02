@@ -306,9 +306,17 @@ async def health():
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
+    # Log the update type so we know what Telegram sent
+    msg = data.get("message", {})
+    print(f"📬 Webhook received: text={msg.get('text','')}, photo_count={len(msg.get('photo',[]))}, chat_id={msg.get('chat', {}).get('id')}")
     update = Update.de_json(data, app_bot.bot)
-    # Process update asynchronously to avoid Telegram timeout
-    asyncio.create_task(app_bot.process_update(update))
+    
+    async def safe_process():
+        try:
+            await app_bot.process_update(update)
+        except Exception as e:
+            print(f"❌ process_update CRASHED: {e}")
+    asyncio.create_task(safe_process())
     return {"ok": True}
 
 # ================== TELEGRAM HANDLERS ==================
