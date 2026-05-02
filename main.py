@@ -288,12 +288,23 @@ def run_prediction(image_bytes: bytes | None = None, text: str | None = None) ->
     ]
 
     # ---------- Nevus over‑confidence guard ----------
-    if is_nevus_blind_guess(top3):
+    # 1) Image mode: always apply the existing guard
+    if image_bytes is not None and is_nevus_blind_guess(top3):
         return {
             "error": "Low confidence",
             "message": "The model is uncertain. It detected a mole‑like pattern, but cannot confidently say it's Nevus. Please provide a clearer image or describe symptoms.",
             "confidence": top3[0]["confidence"],
         }
+
+    # 2) Text-only mode: only reject if the description doesn't suggest a mole
+    if image_bytes is None and top3[0]["disease"] == "Nevus" and top3[0]["confidence"] > 0.95:
+        mole_keywords = ["mole", "nevus", "melanocytic", "birthmark", "beauty mark"]
+        if not any(word in text.lower() for word in mole_keywords):
+            return {
+                "error": "Low confidence",
+                "message": "The model could not confidently match your description to a specific condition. Please provide more details or an image.",
+                "confidence": top3[0]["confidence"],
+            }
 
     return {"top_predictions": top3}
 
