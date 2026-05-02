@@ -4,7 +4,7 @@ import io
 import numpy as np
 import tensorflow as tf
 
-# ---- MEMORY OPTIMISATION (1) ----
+# ---- MEMORY OPTIMISATION ----
 tf.config.threading.set_intra_op_parallelism_threads(1)
 tf.config.threading.set_inter_op_parallelism_threads(1)
 
@@ -39,7 +39,6 @@ CANONICAL_CLASSES = [
     "Seborrheic Keratosis",
     "Squamous Cell Carcinoma",
     "Vascular Lesion",
-    # ----- NEW CLASSES (from image dataset) -----
     "Atopic Dermatitis",
     "Contact Dermatitis",
     "Eczema",
@@ -81,7 +80,6 @@ def download_models():
         "PrudhviManikanta/skin-disease-efficientnet-multiclass",
         "model.keras",
     )
-    # ---- MEMORY OPTIMISATION (2): skip compilation ----
     image_model = tf.keras.models.load_model(image_path, compile=False)
     text_model = tf.keras.models.load_model(text_path, compile=False)
 
@@ -94,14 +92,10 @@ app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. Download models
     download_models()
-
-    # 2. Initialize the bot
     await app_bot.initialize()
     print("✅ Bot initialized")
 
-    # 3. Set webhook
     render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
     if not render_host:
         webhook_url = f"https://{os.getenv('HOST', 'localhost')}/webhook"
@@ -110,19 +104,15 @@ async def lifespan(app: FastAPI):
     await app_bot.bot.set_webhook(webhook_url)
     print(f"✅ Webhook set to {webhook_url}")
 
-    # 4. Pre‑warm the image model (one‑time JIT compilation)
-    print("🔥 Warming up image model (this may take 1–2 minutes)...")
+    print("🔥 Warming up image model (1-2 min)...")
     dummy = np.zeros((1, 224, 224, 3), dtype=np.float32)
     image_model.predict(dummy)
     print("✅ Image model warmed up")
 
-    # ---- MEMORY OPTIMISATION (3): garbage collect ----
     import gc
     gc.collect()
 
     yield
-
-    # Shutdown
     await app_bot.bot.delete_webhook()
     await app_bot.shutdown()
 
@@ -210,11 +200,13 @@ def get_confidence_label(conf):
     else:
         return "Low ❗"
 
-# ================== NEVUS OVERCONFIDENCE GUARD ==================
+# ================== NEVUS GUARD ==================
 NEVUS_OVERCONFIDENCE_THRESHOLD = 0.95
 NEVUS_GAP_THRESHOLD = 0.80
+MOLE_KEYWORDS = ["mole", "nevus", "melanocytic", "birthmark", "beauty mark"]
 
 def is_nevus_blind_guess(top3):
+    """Check if Nevus is top with extremely high confidence and large gap."""
     if not top3:
         return False
     first = top3[0]
@@ -230,7 +222,6 @@ def is_nevus_blind_guess(top3):
 
 # ================== SHARED PREDICTION LOGIC ==================
 def run_prediction(image_bytes: bytes | None = None, text: str | None = None) -> dict:
-    """Returns the prediction dictionary used by both API and Telegram."""
     if image_bytes is None and text is None:
         raise HTTPException(400, "Please provide an image or text description.")
 
@@ -254,7 +245,7 @@ def run_prediction(image_bytes: bytes | None = None, text: str | None = None) ->
         print("IMAGE PRED:", img_pred)
 
     # ------ Text model ------
-    if text and not (text and rule_based_prediction(text)):  # already handled rule
+    if text and not rule_based_prediction(text):
         txt = preprocess_text(text)
         text_pred = text_model.predict(txt)
         print("TEXT PRED:", text_pred)
@@ -288,7 +279,7 @@ def run_prediction(image_bytes: bytes | None = None, text: str | None = None) ->
     ]
 
     # ---------- Nevus over‑confidence guard ----------
-    # 1) Image mode: always apply the existing guard
+    # Image mode: unchanged (reject and ask for clearer image)
     if image_bytes is not None and is_nevus_blind_guess(top3):
         return {
             "error": "Low confidence",
@@ -296,15 +287,29 @@ def run_prediction(image_bytes: bytes | None = None, text: str | None = None) ->
             "confidence": top3[0]["confidence"],
         }
 
-    # 2) Text-only mode: only reject if the description doesn't suggest a mole
-    if image_bytes is None and top3[0]["disease"] == "Nevus" and top3[0]["confidence"] > 0.95:
-        mole_keywords = ["mole", "nevus", "melanocytic", "birthmark", "beauty mark"]
-        if not any(word in text.lower() for word in mole_keywords):
-            return {
-                "error": "Low confidence",
-                "message": "The model could not confidently match your description to a specific condition. Please provide more details or an image.",
-                "confidence": top3[0]["confidence"],
-            }
+    # Text‑only mode: if Nevus blind guess and no mole keywords → remove Nevus and promote next best
+    if image_bytes is None and is_nevus_blind_guess(top3):
+        if text and not any(word in text.lower() for word in MOLE_KEYWORDS):
+            # Re‑compute probabilities without Nevus
+            prob = final_pred.copy()
+            nevus_idx = CANONICAL_CLASSES.index("Nevus")
+            prob[nevus_idx] = 0.0
+            new_top_idx = np.argsort(prob)[::-1][:3]
+            new_top3 = [
+                {
+                    "disease": CANONICAL_CLASSES[int(i)],
+                    "confidence": float(prob[int(i)]) / (np.sum(prob) + 1e-8),
+                }
+                for i in new_top_idx
+            ]
+            # If the new top confidence is too low, give a graceful fallback
+            if new_top3[0]["confidence"] < MIN_CONFIDENCE:
+                return {
+                    "error": "Low confidence",
+                    "message": "The model could not confidently match your description to a specific condition. Please provide more details or an image.",
+                    "confidence": new_top3[0]["confidence"],
+                }
+            return {"top_predictions": new_top3}
 
     return {"top_predictions": top3}
 
@@ -325,11 +330,10 @@ async def health():
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
-    # Log the update type so we know what Telegram sent
     msg = data.get("message", {})
     print(f"📬 Webhook received: text={msg.get('text','')}, photo_count={len(msg.get('photo',[]))}, chat_id={msg.get('chat', {}).get('id')}")
     update = Update.de_json(data, app_bot.bot)
-    
+
     async def safe_process():
         try:
             await app_bot.process_update(update)
@@ -365,7 +369,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if photo:
             print("📥 Downloading image…")
             file = await photo[-1].get_file()
-            # Timeout on download (30 seconds)
             try:
                 raw_bytes = await asyncio.wait_for(
                     file.download_as_bytearray(),
@@ -377,7 +380,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ Image download timed out. Please try again.")
                 return
 
-        # Run prediction in a thread with a generous timeout (120 seconds)
         print("⏳ Running prediction...")
         result = await asyncio.wait_for(
             asyncio.to_thread(run_prediction, image_bytes=img_bytes, text=text),
