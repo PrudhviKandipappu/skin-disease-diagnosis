@@ -34,6 +34,13 @@ CANONICAL_CLASSES = [
     "Seborrheic Keratosis",
     "Squamous Cell Carcinoma",
     "Vascular Lesion",
+    # ----- NEW CLASSES (from image dataset) -----
+    "Atopic Dermatitis",        # AD (will be mapped from text model's "Atopic Dermatitis")
+    "Contact Dermatitis",       # CD
+    "Eczema",                   # EC (generic)
+    "Scabies",                  # SC
+    "Seborrheic Dermatitis",    # SD
+    "Tinea Corporis",           # TC (ringworm of body)
 ]
 
 TEXT_CLASSES = [
@@ -49,10 +56,11 @@ TEXT_CLASSES = [
 ]
 
 TEXT_TO_CANONICAL = {
-    "Atopic Dermatitis": "Dyshidrotic Eczema",
+    "Atopic Dermatitis": "Atopic Dermatitis",           # now direct
     "Benign keratosis": "Pigmented Benign Keratosis",
     "Melanocytic nevus": "Nevus",
-    "Tinea Ringworm Candidiasis": "Ringworm",
+    "Tinea Ringworm Candidiasis": "Tinea Corporis",     # more specific
+    # Original fallback: Ringworm still works if you want
 }
 
 # ================== GLOBAL MODELS ==================
@@ -97,6 +105,12 @@ async def lifespan(app: FastAPI):
     await app_bot.bot.set_webhook(webhook_url)
     print(f"✅ Webhook set to {webhook_url}")
 
+    # 4. Pre‑warm the image model (one‑time compilation)
+    print("🔥 Warming up image model (this may take 1–2 minutes)...")
+    dummy = np.zeros((1, 224, 224, 3), dtype=np.float32)
+    image_model.predict(dummy)
+    print("✅ Image model warmed up")
+
     yield
 
     # Shutdown
@@ -128,20 +142,29 @@ def is_medical_text(text):
 
 def rule_based_prediction(text):
     text = text.lower()
-    if "ring" in text or "circular" in text or "round" in text:
-        return "Ringworm"
+    # Common ringworm clues
+    if "ring" in text or "circular" in text or "round" in text or "tinea" in text:
+        return "Tinea Corporis"   # or "Ringworm" – we'll use the new class
     if "pimple" in text or "acne" in text:
         return "Acne"
     if "dark mole" in text:
         return "Melanoma"
+    # New disease keywords
+    if "scabies" in text:
+        return "Scabies"
+    if "seborrheic dermatitis" in text or "seb derm" in text:
+        return "Seborrheic Dermatitis"
+    if "contact dermatitis" in text:
+        return "Contact Dermatitis"
+    if "eczema" in text and "dyshidrotic" not in text:
+        return "Eczema"
+    if "atopic dermatitis" in text or "atopic eczema" in text:
+        return "Atopic Dermatitis"
     return None
-
-# is_text_reliable is no longer used, but kept for reference
-# def is_text_reliable(text_pred):
-#     return np.max(text_pred[0]) < 0.9
 
 # ================== MAPPING ==================
 def map_text_to_canonical(text_probs):
+    # Now canonical_probs array length matches the extended CANONICAL_CLASSES
     canonical_probs = np.zeros(len(CANONICAL_CLASSES))
     for i, text_class in enumerate(TEXT_CLASSES):
         canonical_name = TEXT_TO_CANONICAL.get(text_class, text_class)
@@ -181,6 +204,24 @@ def get_confidence_label(conf):
     else:
         return "Low ❗"
 
+# ================== NEVUS OVERCONFIDENCE GUARD ==================
+NEVUS_OVERCONFIDENCE_THRESHOLD = 0.95
+NEVUS_GAP_THRESHOLD = 0.80
+
+def is_nevus_blind_guess(top3):
+    if not top3:
+        return False
+    first = top3[0]
+    if first["disease"] != "Nevus":
+        return False
+    if first["confidence"] < NEVUS_OVERCONFIDENCE_THRESHOLD:
+        return False
+    if len(top3) > 1:
+        gap = first["confidence"] - top3[1]["confidence"]
+        if gap < NEVUS_GAP_THRESHOLD:
+            return False
+    return True
+
 # ================== SHARED PREDICTION LOGIC ==================
 def run_prediction(image_bytes: bytes | None = None, text: str | None = None) -> dict:
     """Returns the prediction dictionary used by both API and Telegram."""
@@ -211,7 +252,6 @@ def run_prediction(image_bytes: bytes | None = None, text: str | None = None) ->
         txt = preprocess_text(text)
         text_pred = text_model.predict(txt)
         print("TEXT PRED:", text_pred)
-        # Reliability check removed – we now trust the model
 
     final_pred = fuse(img_pred, text_pred)
 
@@ -240,6 +280,15 @@ def run_prediction(image_bytes: bytes | None = None, text: str | None = None) ->
         }
         for i in top3_idx
     ]
+
+    # ---------- Nevus over‑confidence guard ----------
+    if is_nevus_blind_guess(top3):
+        return {
+            "error": "Low confidence",
+            "message": "The model is uncertain. It detected a mole‑like pattern, but cannot confidently say it's Nevus. Please provide a clearer image or describe symptoms.",
+            "confidence": top3[0]["confidence"],
+        }
+
     return {"top_predictions": top3}
 
 # ================== API ROUTES ==================
