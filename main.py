@@ -178,14 +178,22 @@ def fuse(img_pred=None, text_pred=None):
         text = map_text_to_canonical(text_pred[0])
         img = img / (np.sum(img) + 1e-8)
         text = text / (np.sum(text) + 1e-8)
+
         img_conf = np.max(img)
         text_conf = np.max(text)
+
+        # If the image is very confident, trust it completely
         if img_conf > 0.85:
             return img
-        elif text_conf > 0.85:
+
+        # If the image is very weak (likely not a skin image), let the text dominate
+        if img_conf < 0.4:
             return text
-        else:
-            return (0.7 * img) + (0.3 * text)
+
+        # Otherwise, always blend – the image is reliable enough that the text
+        # should not be allowed to override it. 0.7 image + 0.3 text.
+        return (0.7 * img) + (0.3 * text)
+
     if img_pred is not None:
         return img_pred[0]
     if text_pred is not None:
